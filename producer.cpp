@@ -4,84 +4,84 @@
 // producer
 
 #include <iostream>
-#include <stdlib.h>
-#include <fcntl.h>
-#include <sys/shm.h>
-#include <sys/mman.h>
-#include <sys/stat.h>
+#include <pthread.h>
 #include <semaphore.h>
 #include <unistd.h>
-#include <sys/types.h>
+#include <cstdlib>
+#include <sys/mman.h>
+#include "shared.hpp"
 
+int main(int argc, char* argv[]){
 
-int main()
-{
-    //define shared mem and semaphore names
-    const char nameMem = "Shared Memory";
-    const charsemaFull = "Full";
-    const char available = "Available";
-    const charmutexSem = "Mutex";
-
-    const int SIZE = 2; // buffer size
-
-    sem_t fill,ready, mutex;    //semaphore pointers
-    int shared_memory_file_descriptor; //File descripter for shared mem
-    intbuffer;    //buffer pointer
-    int loop_count = 5;     //num of iterations
-
-    // create and open shared mem 
-    shared_memory_file_descriptor = shm_open(nameMem, O_CREAT | O_RDWR, 0666);
-
-    // Set the size of the shared mem
-    ftruncate(shared_memory_file_descriptor, sizeof(int));
-
-    //map shared mem to address space
-    buffer = (int )mmap(0, sizeof(int), PROT_READ | PROT_WRITE, MAP_SHARED, shared_memory_file_descriptor, 0);
-
-    //open semaphores
-    fill = sem_open(semaFull, O_CREAT, 0666, 0);
-    ready = sem_open(available, O_CREAT, 0666, 3);
-    mutex = sem_open(mutexSem, O_CREAT, 0666, 1);
-
-
-    std::cout << "\n"  //empty line
-              << std::endl;
-    while (loop_count--)
-    {
-        // wait until space is available
-        sem_wait(ready);
-        sleep(rand()%2+1); //wait to see if  available/wait on the mutex lock 
-        sem_wait(mutex);   //wait for exclusive access
-
-        // limit table size
-        //check if buffer is not full
-        if (buffer < SIZE)
-        {
-            (buffer)++; //added an item to the buffer
-            std::cout << "Produced an item" << std::endl;
-            sem_post(mutex);  // release exclusive access
-            sem_post(fill); // send that semaphore is open
-
-            //if buffer is full, print a message
-            if (buffer == SIZE)
-            {
-                std::cout << "The producer table is full\n";
-            }
-        }
+    // create/open the shared memory 
+    int shmShared = shm_open(shmPath, O_CREAT | O_RDWR, S_IRUSR | S_IWUSR);
+    if (shmShared == -1) {
+        std::cerr << "Error creating shared memory: " << strerror(errno) << std::endl;
+        return 1;
     }
 
-    // Close and unlink semaphores
-    sem_close(fill);
-    sem_close(ready);
-    sem_close(mutex);
-    sem_unlink(semaFull);
-    sem_unlink(available);
-    sem_unlink(mutexSem);
+    //set the size of the shared memory
+    ftruncate(shmShared, sizeof(sharedData));
 
-    // close and unlink shared memory
-    munmap(buffer, sizeof(int));
-    close(shared_memory_file_descriptor);
-    shm_unlink(nameMem);
+    // map the shared memory
+    sharedData *producer = static_cast<sharedData*>(mmap(nullptr, sizeof(sharedData), PROT_READ | PROT_WRITE, MAP_SHARED, shmShared, 0));
+    if (producer == MAP_FAILED) {
+        std::cerr << "Error mapping shared memory: " << strerror(errno) << std::endl;
+        close(shmShared);
+        return 1;
+    }
+
+    // initalizing
+    producer->in = 0;
+    producer->out = 0;
+
+    // unlink any existing semaphores
+    sem_unlink("/empty_semaphore");
+    sem_unlink("/full_semaphore");
+    sem_unlink("/mutex_semaphore");
+   
+
+    // create and initialize the semaphores
+    producer->empty = sem_open("/empty_semaphore", O_CREAT, 0666, maxItems);
+    producer->full = sem_open("/full_semaphore", O_CREAT, 0666, 0);
+    producer->mutex = sem_open("/mutex_semaphore", O_CREAT, 0666, 1);
+
+
+    if (producer->empty == SEM_FAILED || producer->full == SEM_FAILED) {
+        std::cerr << "Error initializing semaphores: " << strerror(errno) << std::endl;
+        munmap(producer, sizeof(sharedData));
+        close(shmShared);
+        return 1;
+    }
+
+    // producing items
+    for (int i = 0; i < 2; ++i) {
+        sleep(1);  // waiting to simulate work
+        sem_wait(producer->empty); // wait until there is an empty slot
+        sem_wait(producer->mutex); // lock the critical section
+    
+        //update the 'in' index and produce an item
+        producer->in = (producer->in + 1) % maxItems; 
+        std::cout << " " << std::endl;
+        std::cout << "Produced : " << i << std::endl;
+
+
+        sem_post(producer->mutex); // unlocking the critical section
+        sem_post(producer->full);  // signal that new item is produced
+
+    }
+
+    // cleanup
+    sem_unlink("/empty_semaphore");
+    sem_unlink("/full_semaphore");
+    sem_unlink("/mutex_semaphore");
+    shm_unlink(shmPath);
+    sem_close(producer->empty);
+    sem_close(producer->full);
+    sem_close(producer->mutex);
+
+    munmap(producer, sizeof(sharedData));
+    close(shmShared);
 
     return 0;
 }
