@@ -4,78 +4,65 @@
 // Consumer
 
 #include <iostream>
-#include <stdlib.h>
-#include <fcntl.h>
-#include <sys/shm.h>
-#include <sys/mman.h>
-#include <sys/stat.h>
+#include <pthread.h>
 #include <semaphore.h>
 #include <unistd.h>
-#include <sys/types.h>
+#include <cstdlib>
+#include <sys/mman.h>
+#include "shared.hpp"
 
-void PrintSemaphoreValue(std::string nameMem, sem_t semaphore, int &value);
-int main()
-{
-    const charnameMem = "Shared Memory";
-    const char semaFull = "Full";
-    const charavailable = "Available"; //for semaphores open functions
-    const char mutexSem = "Mutex";
+int main(int argc, char *argv[]) {
+    sleep(1); // make sure the producer runs first by sleeping for one second
 
-    const int SIZE = 2; // size of buffer
-
-    sem_tfill, ready,mutex; // semaphore pointers
-    int shared_memory_file_descriptor; //shared mem file discriptor
-    int buffer; //pointer to the shared mem buffer
-    int loop_count = 5; //number of iterations 
-
-    // Make shared process
-    shared_memory_file_descriptor = shm_open(nameMem, O_CREAT | O_RDWR, 0666);
-
-    // Set the size of the mem
-    ftruncate(shared_memory_file_descriptor, sizeof(int));
-
-    //map shared mem
-    buffer = (int)mmap(0, sizeof(int), PROT_READ | PROT_WRITE, MAP_SHARED, shared_memory_file_descriptor, 0);
-
-    //open the semaphores
-    fill = sem_open(semaFull, O_RDWR);
-
-    ready = sem_open(available, O_RDWR);
-
-    mutex = sem_open(mutexSem, O_RDWR);
-
-    //variable that holds semaphore value
-    int value = -1;
-    while(loop_count--){
-        sem_wait(fill);         //wait until buffer is not empty
-        sem_wait(mutex);        //wait for exclusive access to buffer
-
-        (* buffer)--;           //consume
-        sem_post(mutex);        //release access
-        std::cout << "consumed an item\n"; //take item out
-        sem_post(ready); //post that semephore is now open
+    //open the shared memory
+    int shmShared = shm_open(shmPath, O_RDWR, S_IRUSR | S_IWUSR);
+    if(shmShared == -1) {
+        std::cerr << "Waiting for shared memory to be created..." << std::endl;
+        sleep(1); // wait again before retrying
     }
 
+    //set size of mem
+    ftruncate(shmShared, sizeof(int));
 
+    // map the shared mem to the address space of the process
+    sharedData *consumer = (sharedData*)(mmap(nullptr, sizeof(sharedData), PROT_READ | PROT_WRITE, MAP_SHARED, shmShared, 0));
+    if (consumer == MAP_FAILED) {
+        std::cerr << "ERROR IN MAPPING SHARED MEMORY: " << strerror(errno) << std::endl;
+        close(shmShared);
+        return 1;
+    }
 
-    // Close and unlink semaphores Remove Shared mem
-    sem_close(fill);
-    sem_close(ready);
-    sem_close(mutex);
-    sem_unlink(semaFull); 
-    sem_unlink(available);
-    sem_unlink(mutexSem);
+    // initializing semaphores and variables for buffer.
+    consumer->empty = sem_open("/empty_semaphore", 0);
+    consumer->full = sem_open("/full_semaphore", 0);
 
-    /* close and unlink shared memory*/
-    munmap(buffer, sizeof(int));
-    close(shared_memory_file_descriptor);
-    shm_unlink(nameMem);
+    if (consumer->empty == SEM_FAILED || consumer->full == SEM_FAILED) {
+        std::cerr << "Error opening semaphores: " << strerror(errno) << std::endl;
+        munmap(consumer, sizeof(sharedData));
+        close(shmShared);
+        return 1;
+    }
 
+    // consume a number of items
+    for (int i = 0; i < 2; ++i) {
+        sleep(1);
+        sem_wait(consumer->full);    // wait until the buffer is not empty
+        sem_wait(consumer->mutex);  // locking the critical section
+        std::cout << " " << std::endl;
+        std::cout << "Consumed : " << i << std::endl;
+
+        consumer->out = (consumer->out + 1) % maxItems;  // update index
+        sem_post(consumer->empty); // signal empty slot
+        sem_post(consumer->mutex); // unlock the critical section
+    }
+
+    // unmap the shared memory
+    if (munmap(consumer, sizeof(sharedData)) == -1) {
+         std::cerr << "Error unmapping shared memory: " << strerror(errno) << std::endl;
+    }
+
+    // cleanup
+    close(shmShared);    //close the shared memory object
+    shm_unlink(shmPath);    // Remove the shared memory object
     return 0;
-}
-
-
-// function to print the semaphore value
-void PrintSemaphoreValue(std::string nameMem, sem_tsemaphore, int &value) {
-    std::cout << nameMem << " value: " << sem_getvalue(semaphore, &value) << std::endl;
 }
